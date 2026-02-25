@@ -218,16 +218,23 @@ def plot_trace(df: pd.DataFrame, output_file: str, title: str = "Nsight Systems 
     """
     df = df.copy()
 
-    # One track per stream — kernels and memcpy on the same row
-    df["track_name"] = df["stream_id"].apply(lambda s: f"Stream {s}")
+    # Two rows: "Kernel Compute" and "Memory Copy"
+    df["track_name"] = df["event_type"].apply(
+        lambda t: "Kernel Compute" if t in ("kernel", "kernel_bin") else "Memory Copy"
+    )
     df["duration_ms"] = df["end_ms"] - df["start_ms"]
+
+    # Ensure tiny events are visible: clamp to min 0.05% of view
+    view_span = df["end_ms"].max() - df["start_ms"].min()
+    min_bar_ms = max(view_span * 0.0005, 0.001)
+    df["plot_duration_ms"] = df["duration_ms"].clip(lower=min_bar_ms)
+
     df = df.sort_values(by=["track_name", "start_ms"]).reset_index(drop=True)
 
     # Assign a legend category to each event
     def legend_category(row):
         if row["event_type"] in ("kernel", "kernel_bin"):
             return "Compute (kernel)"
-        # memcpy — subcategorize by direction
         fn = str(row.get("full_name", ""))
         if "HtoD" in fn:
             return "Memcpy HtoD"
@@ -262,24 +269,28 @@ def plot_trace(df: pd.DataFrame, output_file: str, title: str = "Nsight Systems 
         axis=1,
     )
 
-    unique_tracks = sorted(df["track_name"].unique())
+    unique_tracks = ["Kernel Compute", "Memory Copy"]
 
     fig = go.Figure()
 
-    # One trace per legend category so they share y-rows but get distinct legend entries
+    # One trace per legend category — all land on one of the two rows
     for cat in ["Compute (kernel)", "Memcpy HtoD", "Memcpy DtoH", "Memcpy DtoD", "Memcpy (other)"]:
         sub = df[df["category"] == cat]
         if sub.empty:
             continue
+        is_memcpy = cat.startswith("Memcpy")
         fig.add_trace(go.Bar(
             name=cat,
             y=sub["track_name"],
-            x=sub["duration_ms"],
+            x=sub["plot_duration_ms"],
             base=sub["start_ms"],
             orientation="h",
             marker=dict(
                 color=category_colors[cat],
-                line=dict(color="white", width=0.5),
+                line=dict(
+                    color=category_colors[cat] if is_memcpy else "white",
+                    width=2 if is_memcpy else 0.5,
+                ),
             ),
             text=sub["op_name"],
             textposition="inside",
@@ -291,13 +302,11 @@ def plot_trace(df: pd.DataFrame, output_file: str, title: str = "Nsight Systems 
             showlegend=True,
         ))
 
-    height = max(400, 150 + 80 * len(unique_tracks))
-
     fig.update_layout(
         title=dict(text=title, font=dict(size=16)),
         xaxis_title="Time (ms)",
-        yaxis_title="Stream",
-        height=height,
+        yaxis_title="",
+        height=400,
         margin=dict(l=150, r=50, t=60, b=50),
         plot_bgcolor="white",
         hovermode="closest",
